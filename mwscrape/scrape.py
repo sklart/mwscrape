@@ -19,7 +19,7 @@ import urllib.parse
 from urllib.parse import urlparse
 from urllib.parse import urlunparse
 from collections import namedtuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from multiprocessing import RLock
 from multiprocessing.pool import ThreadPool
 from contextlib import contextmanager
@@ -362,7 +362,7 @@ def main():
         )
         print("Starting session %s" % session_id)
         sessions_db[session_id] = {
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "site": site_host,
             "db_name": db_name,
             "descending": descending,
@@ -458,7 +458,7 @@ def main():
         with lock:
             session_doc = sessions_db[session_id]
             session_doc["last_page_name"] = title
-            session_doc["updated_at"] = datetime.utcnow().isoformat()
+            session_doc["updated_at"] = datetime.now(timezone.utc).isoformat()
             sessions_db[session_id] = session_doc
 
     def process(page):
