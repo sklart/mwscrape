@@ -336,7 +336,7 @@ def main():
         site_host = session_doc["site"]
         scheme, host = scheme_and_host(site_host)
         db_name = session_doc["db_name"]
-        session_doc["resumed_at"] = datetime.utcnow().isoformat()
+        session_doc["resumed_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         if args.start:
             start_page_name = args.start
         else:
@@ -429,7 +429,7 @@ def main():
     elif args.changes_since or args.recent:
         if args.recent:
             recent_days = args.recent_days
-            changes_since = fmt_mw_tms(datetime.utcnow() + timedelta(days=-recent_days))
+            changes_since = fmt_mw_tms(datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=-recent_days))
         else:
             changes_since = args.changes_since.ljust(14, "0")
         print("Getting recent changes (since %s)" % changes_since)
