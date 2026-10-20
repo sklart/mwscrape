@@ -19,7 +19,7 @@ import urllib.parse
 from urllib.parse import urlparse
 from urllib.parse import urlunparse
 from collections import namedtuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from multiprocessing import RLock
 from multiprocessing.pool import ThreadPool
 from contextlib import contextmanager
@@ -29,6 +29,7 @@ import mwclient
 import mwclient.page
 import mwclient.client
 import pylru
+import requests
 
 import _thread
 
@@ -165,6 +166,18 @@ def parse_args():
         help=("Network communications timeout. " "Default: %(default)ss"),
     )
     argparser.add_argument(
+        "--max-retries",
+        default=25,
+        type=int,
+        help="Maximum mwclient retries per API request. Default: %(default)s",
+    )
+    argparser.add_argument(
+        "--retry-timeout",
+        default=30,
+        type=int,
+        help="Seconds added to each retry wait. Default: %(default)s",
+    )
+    argparser.add_argument(
         "-S",
         "--siteinfo-only",
         action="store_true",
@@ -228,6 +241,12 @@ def parse_args():
         type=str,
         default=None,
         help=("HTTP user agent string. Default: %s" % mwclient.client.USER_AGENT),
+    )
+
+    argparser.add_argument(
+        "--stop-on-error",
+        action="store_true",
+        help="Stop instead of continuing after an article request or storage error",
     )
 
     return argparser.parse_args()
@@ -316,6 +335,9 @@ def fmt_mw_tms(dt):
 def main():
     args = parse_args()
 
+    if args.max_retries < 0 or args.retry_timeout < 0:
+        raise ValueError("Retry limits must be non-negative")
+
     socket.setdefaulttimeout(args.timeout)
 
     couch_server = mkcouch(args.couch)
@@ -336,7 +358,7 @@ def main():
         site_host = session_doc["site"]
         scheme, host = scheme_and_host(site_host)
         db_name = session_doc["db_name"]
-        session_doc["resumed_at"] = datetime.utcnow().isoformat()
+        session_doc["resumed_at"] = datetime.now(timezone.utc).isoformat()
         if args.start:
             start_page_name = args.start
         else:
@@ -362,7 +384,7 @@ def main():
         )
         print("Starting session %s" % session_id)
         sessions_db[session_id] = {
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "site": site_host,
             "db_name": db_name,
             "descending": descending,
@@ -380,6 +402,8 @@ def main():
         ext=args.site_ext,
         scheme=scheme,
         custom_headers=headers,
+        max_retries=args.max_retries,
+        retry_timeout=args.retry_timeout,
     )
 
     update_siteinfo(site, couch_server, db_name)
@@ -429,7 +453,9 @@ def main():
     elif args.changes_since or args.recent:
         if args.recent:
             recent_days = args.recent_days
-            changes_since = fmt_mw_tms(datetime.utcnow() + timedelta(days=-recent_days))
+            changes_since = fmt_mw_tms(
+                datetime.now(timezone.utc) - timedelta(days=recent_days)
+            )
         else:
             changes_since = args.changes_since.ljust(14, "0")
         print("Getting recent changes (since %s)" % changes_since)
@@ -458,7 +484,7 @@ def main():
         with lock:
             session_doc = sessions_db[session_id]
             session_doc["last_page_name"] = title
-            session_doc["updated_at"] = datetime.utcnow().isoformat()
+            session_doc["updated_at"] = datetime.now(timezone.utc).isoformat()
             sessions_db[session_id] = session_doc
 
     def process(page):
@@ -547,10 +573,23 @@ def main():
         except couchdb.ResourceConflict:
             print("Update conflict, skipping: %s" % title)
             return
+        except requests.exceptions.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status in (401, 403, 429):
+                print("HTTP %s while scraping %s; stopping to avoid further requests" % (status, title))
+                raise
+            print("Failed to process %s:" % title)
+            traceback.print_exc()
+            inc_count("error")
+            if args.stop_on_error:
+                raise
+            return
         except Exception:
             print("Failed to process %s:" % title)
             traceback.print_exc()
             inc_count("error")
+            if args.stop_on_error:
+                raise
             return
         if doc:
             doc.update(parse)
@@ -567,6 +606,8 @@ def main():
         except Exception:
             print("Error handling title %r" % title)
             traceback.print_exc()
+            if args.stop_on_error:
+                raise
 
     seen = pylru.lrucache(10000)
 
